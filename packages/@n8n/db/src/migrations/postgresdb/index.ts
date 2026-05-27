@@ -190,7 +190,8 @@ import { CreateAgentHistoryTable1784000000011 } from '../common/1784000000011-Cr
 import { CreateInstanceAiObservationTables1784000000012 } from '../common/1784000000012-CreateInstanceAiObservationTables';
 import { SplitRedactionScopeInCustomRoles1784000000013 } from '../common/1784000000013-SplitRedactionScopeInCustomRoles';
 import { PersistInstanceAiPendingConfirmations1784000000014 } from '../common/1784000000014-PersistInstanceAiPendingConfirmations';
-import { CreateAgentFilesTable1784000000015 } from '../common/1784000000015-CreateAgentFilesTable';
+import { AddSourceWorkflowIdToWorkflow1784000000015 } from '../common/1784000000015-AddSourceWorkflowIdToWorkflow';
+import { CreateAgentFilesTable1784000000016 } from '../common/1784000000016-CreateAgentFilesTable';
 import type { Migration } from '../migration-types';
 
 export const postgresMigrations: Migration[] = [
@@ -386,5 +387,6 @@ export const postgresMigrations: Migration[] = [
 	CreateInstanceAiObservationTables1784000000012,
 	SplitRedactionScopeInCustomRoles1784000000013,
 	PersistInstanceAiPendingConfirmations1784000000014,
-	CreateAgentFilesTable1784000000015,
+	AddSourceWorkflowIdToWorkflow1784000000015,
+	CreateAgentFilesTable1784000000016,
 ];
