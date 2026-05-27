@@ -3,7 +3,7 @@ import type { RuntimeSkill } from '@n8n/agents';
 export function researchSkill(): RuntimeSkill {
 	return {
 		id: 'agent-builder-research',
-		name: 'Agent builder research',
+		name: 'Agent Builder Research',
 		description:
 			'Use when current external API, service, product, standard, or spec facts affect target-agent config, tool choices, credential choices, or instructions; not for n8n internals, local schema, or builder tool contracts.',
 		instructions: `\
@@ -20,12 +20,11 @@ Use this when external facts can change the target-agent build.
 ## Workflow
 
 1. Loading this skill is not research; when current external facts affect the
-   build, actually use the available provider web-search tool. In the default
-   builder setup this is Anthropic's \`web_search\`.
+   build, use the available research capability before relying on memory.
 2. Search only for the external facts that change the config or implementation choice.
 3. Prefer primary docs for endpoint, auth, product, or spec details.
 4. Apply only the verified details needed for the current target-agent build.
-5. If no web-search tool is available, say so instead of filling current facts from memory.
+5. If no research capability is available, say so instead of filling current facts from memory.
 
 ## Gotchas
 

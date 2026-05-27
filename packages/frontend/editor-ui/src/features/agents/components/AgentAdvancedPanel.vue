@@ -13,7 +13,7 @@ import { ref, computed, watch } from 'vue';
 import { useDebounceFn } from '@vueuse/core';
 import {
 	N8nCollapsiblePanel,
-	N8nInput,
+	N8nInputNumber2,
 	N8nSelect,
 	N8nSwitch2,
 	N8nText,
@@ -32,8 +32,11 @@ import {
 import { parseProvider } from '../utils/model-string';
 import {
 	getNativeWebSearchArgs,
+	getWebSearchMethod,
+	type FallbackWebSearchProvider,
 	type NativeWebSearchArgs,
-	withNativeWebSearchConfig,
+	type WebSearchMethod,
+	withWebSearchConfig,
 } from '../utils/nativeWebSearch';
 
 const i18n = useI18n();
@@ -41,9 +44,8 @@ const credentialsStore = useCredentialsStore();
 const DEFAULT_CAPABILITIES = { thinking: false, webSearch: false, providerTools: [] } as const;
 const ANTHROPIC_WEB_SEARCH_DEFAULT_MAX_USES = 5;
 const SEARCH_CONTEXT_SIZE_OPTIONS = ['low', 'medium', 'high'] as const;
-const FALLBACK_WEB_SEARCH_PROVIDERS = ['brave', 'searxng'] as const;
 type SearchContextSize = (typeof SEARCH_CONTEXT_SIZE_OPTIONS)[number];
-type FallbackWebSearchProvider = (typeof FALLBACK_WEB_SEARCH_PROVIDERS)[number];
+type WebSearchSelectValue = 'off' | WebSearchMethod;
 
 const props = withDefaults(
 	defineProps<{ config: AgentJsonConfig | null; disabled?: boolean; collapsible?: boolean }>(),
@@ -58,8 +60,85 @@ const isExpanded = ref(!props.collapsible);
 
 const provider = computed(() => parseProvider(props.config?.model));
 const capabilities = computed(() => PROVIDER_CAPABILITIES[provider.value] ?? DEFAULT_CAPABILITIES);
+const hasNativeWebSearch = computed(() => Boolean(capabilities.value.webSearch));
+
+// ---------------------------------------------------------------------------
+// Generic helper for numeric config fields
+// ---------------------------------------------------------------------------
+
+type ConfigObj = NonNullable<AgentJsonConfig['config']>;
+
+/** Keys of the config object whose value type is `number | undefined`. */
+type NumberConfigKey = keyof {
+	[K in keyof ConfigObj as ConfigObj[K] extends number | undefined ? K : never]: unknown;
+};
+
+/**
+ * Creates a ref, debounced config-emit, change handler, and watch-sync
+ * function for one numeric field inside `config`. Designed for N8nInputNumber2
+ * which emits numbers directly (NaN when the field is cleared).
+ *
+ * @param key          Config key (must be a numeric field).
+ * @param defaultValue Fallback when the key is absent or the field is cleared.
+ *                     Pass `undefined` for optional fields — the key is removed
+ *                     from the config when the field is cleared.
+ */
+function makeNumberField(key: NumberConfigKey, defaultValue: number | undefined) {
+	const value = ref<number | undefined>(props.config?.config?.[key] ?? defaultValue);
+
+	const debouncedEmit = useDebounceFn(() => {
+		const cfg = { ...(props.config?.config ?? {}) };
+		if (value.value === undefined) {
+			delete (cfg as Partial<ConfigObj>)[key];
+		} else {
+			(cfg as ConfigObj)[key] = value.value;
+		}
+		emit('update:config', { config: cfg });
+	}, 500);
+
+	return {
+		modelValue: value,
+		onChange(n: number) {
+			value.value = isNaN(n) ? defaultValue : n;
+			void debouncedEmit();
+		},
+		sync(cfg: AgentJsonConfig | null) {
+			value.value = cfg?.config?.[key] ?? defaultValue;
+		},
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Numeric config fields — add new ones here
+// ---------------------------------------------------------------------------
+
+const CONCURRENCY_MIN = 1;
+const CONCURRENCY_MAX = 20;
+const MAX_ITERATIONS_MIN = 1;
+const MAX_ITERATIONS_MAX = 200;
+const BUDGET_TOKENS_MIN = 1;
+const BUDGET_TOKENS_DEFAULT = 1024;
+
+const {
+	modelValue: concurrencyModelValue,
+	onChange: onConcurrencyChange,
+	sync: syncConcurrency,
+} = makeNumberField('toolCallConcurrency', CONCURRENCY_MIN);
+
+const {
+	modelValue: maxIterationsModelValue,
+	onChange: onMaxIterationsChange,
+	sync: syncMaxIterations,
+} = makeNumberField('maxIterations', undefined);
+
+// ---------------------------------------------------------------------------
+// Thinking — provider-gated, handled separately
+// ---------------------------------------------------------------------------
 
 const webSearchEnabled = ref(props.config?.config?.webSearch?.enabled === true);
+const webSearchMethod = ref<WebSearchSelectValue>(
+	webSearchEnabled.value ? getWebSearchMethod(props.config, hasNativeWebSearch.value) : 'off',
+);
 const webSearchArgs = ref<NativeWebSearchArgs>(
 	getNativeWebSearchArgs(props.config, capabilities.value.webSearch),
 );
@@ -72,11 +151,10 @@ const fallbackWebSearchProvider = ref<FallbackWebSearchProvider>(
 const fallbackWebSearchCredential = ref(props.config?.config?.webSearch?.credential ?? '');
 const thinkingCfg = computed(() => props.config?.config?.thinking ?? null);
 const thinkingEnabled = ref(thinkingCfg.value !== null);
-const budgetTokens = ref(thinkingCfg.value?.budgetTokens ?? 1024);
+const budgetTokens = ref(thinkingCfg.value?.budgetTokens ?? BUDGET_TOKENS_DEFAULT);
 const reasoningEffort = ref<ReasoningEffort>(
 	(thinkingCfg.value?.reasoningEffort as ReasoningEffort) ?? 'medium',
 );
-const toolCallConcurrency = ref(props.config?.config?.toolCallConcurrency ?? 1);
 
 function syncWebSearchOptions(args: NativeWebSearchArgs) {
 	webSearchMaxUses.value =
@@ -101,13 +179,16 @@ watch(
 		if (!cfg) return;
 		const t = cfg.config?.thinking ?? null;
 		thinkingEnabled.value = t !== null;
-		budgetTokens.value = t?.budgetTokens ?? 1024;
+		budgetTokens.value = t?.budgetTokens ?? BUDGET_TOKENS_DEFAULT;
 		reasoningEffort.value = (t?.reasoningEffort as ReasoningEffort) ?? 'medium';
-		toolCallConcurrency.value = cfg.config?.toolCallConcurrency ?? 1;
+		syncConcurrency(cfg);
+		syncMaxIterations(cfg);
 		webSearchEnabled.value = cfg.config?.webSearch?.enabled === true;
+		webSearchMethod.value = webSearchEnabled.value
+			? getWebSearchMethod(cfg, hasNativeWebSearch.value)
+			: 'off';
 		webSearchArgs.value = getNativeWebSearchArgs(cfg, capabilities.value.webSearch);
-		fallbackWebSearchProvider.value =
-			cfg.config?.webSearch?.provider === 'searxng' ? 'searxng' : 'brave';
+		fallbackWebSearchProvider.value = webSearchMethod.value === 'searxng' ? 'searxng' : 'brave';
 		fallbackWebSearchCredential.value = cfg.config?.webSearch?.credential ?? '';
 		syncWebSearchOptions(webSearchArgs.value);
 	},
@@ -115,7 +196,7 @@ watch(
 );
 
 const fallbackCredentialType = computed(() =>
-	fallbackWebSearchProvider.value === 'brave' ? 'braveSearchApi' : 'searXngApi',
+	webSearchMethod.value === 'searxng' ? 'searXngApi' : 'braveSearchApi',
 );
 const fallbackCredentials = computed(() =>
 	credentialsStore.allCredentials.filter(
@@ -123,43 +204,9 @@ const fallbackCredentials = computed(() =>
 	),
 );
 
-function withFallbackWebSearchConfig(enabled: boolean): Partial<AgentJsonConfig> {
-	return {
-		config: {
-			...(props.config?.config ?? {}),
-			webSearch: enabled
-				? {
-						enabled: true,
-						provider: fallbackWebSearchProvider.value,
-						...(fallbackWebSearchCredential.value && {
-							credential: fallbackWebSearchCredential.value,
-						}),
-					}
-				: { enabled: false },
-		},
-	};
-}
-
-function onWebSearchToggle(value: boolean) {
-	webSearchEnabled.value = value;
-	if (!capabilities.value.webSearch) {
-		emit('update:config', withFallbackWebSearchConfig(value));
-		return;
-	}
-	emit(
-		'update:config',
-		withNativeWebSearchConfig(
-			props.config,
-			value,
-			capabilities.value.webSearch,
-			buildWebSearchArgs(),
-		),
-	);
-}
-
 function buildWebSearchArgs(): NativeWebSearchArgs {
 	const tool = capabilities.value.webSearch;
-	if (!tool) return {};
+	if (!tool || webSearchMethod.value !== 'native') return {};
 
 	if (tool === 'anthropic.web_search') {
 		const maxUses = Number(webSearchMaxUses.value);
@@ -178,32 +225,63 @@ function buildWebSearchArgs(): NativeWebSearchArgs {
 	return {};
 }
 
-const emitWebSearchConfig = useDebounceFn(() => {
-	if (!capabilities.value.webSearch || !webSearchEnabled.value) return;
+function emitWebSearchConfig() {
+	if (!webSearchEnabled.value) return;
+	const method = webSearchMethod.value === 'off' ? 'native' : webSearchMethod.value;
 	emit(
 		'update:config',
-		withNativeWebSearchConfig(
+		withWebSearchConfig(
 			props.config,
 			true,
+			method,
 			capabilities.value.webSearch,
 			buildWebSearchArgs(),
+			fallbackWebSearchCredential.value,
 		),
 	);
-}, 500);
-
-function onWebSearchOptionInput() {
-	void emitWebSearchConfig();
 }
 
-function onFallbackProviderChange(value: FallbackWebSearchProvider) {
-	fallbackWebSearchProvider.value = value;
-	fallbackWebSearchCredential.value = '';
-	emit('update:config', withFallbackWebSearchConfig(webSearchEnabled.value));
+function onWebSearchOptionInput() {
+	emitWebSearchConfig();
+}
+
+function onWebSearchMethodChange(value: WebSearchSelectValue) {
+	webSearchMethod.value = value;
+	webSearchEnabled.value = value !== 'off';
+	const method = value === 'off' ? 'native' : value;
+	const nextFallbackProvider = value === 'brave' || value === 'searxng' ? value : null;
+	if (nextFallbackProvider && nextFallbackProvider !== fallbackWebSearchProvider.value) {
+		fallbackWebSearchCredential.value = '';
+	}
+	if (nextFallbackProvider) {
+		fallbackWebSearchProvider.value = nextFallbackProvider;
+	}
+	emit(
+		'update:config',
+		withWebSearchConfig(
+			props.config,
+			webSearchEnabled.value,
+			method,
+			capabilities.value.webSearch,
+			buildWebSearchArgs(),
+			fallbackWebSearchCredential.value,
+		),
+	);
 }
 
 function onFallbackCredentialChange(value: string) {
 	fallbackWebSearchCredential.value = value;
-	emit('update:config', withFallbackWebSearchConfig(webSearchEnabled.value));
+	emit(
+		'update:config',
+		withWebSearchConfig(
+			props.config,
+			webSearchEnabled.value,
+			webSearchMethod.value === 'off' ? 'native' : webSearchMethod.value,
+			capabilities.value.webSearch,
+			buildWebSearchArgs(),
+			value,
+		),
+	);
 }
 
 function emitThinking() {
@@ -229,9 +307,8 @@ function onThinkingToggle(value: boolean) {
 }
 
 const emitBudget = useDebounceFn(emitThinking, 500);
-function onBudgetInput(value: string) {
-	const n = Number(value);
-	if (!Number.isFinite(n) || n < 1) return;
+function onBudgetChange(n: number) {
+	if (isNaN(n) || n < BUDGET_TOKENS_MIN) return;
 	budgetTokens.value = n;
 	void emitBudget();
 }
@@ -239,18 +316,6 @@ function onBudgetInput(value: string) {
 function onReasoningEffortChange(value: ReasoningEffort) {
 	reasoningEffort.value = value;
 	emitThinking();
-}
-
-const emitConcurrency = useDebounceFn(() => {
-	emit('update:config', {
-		config: { ...props.config?.config, toolCallConcurrency: toolCallConcurrency.value },
-	});
-}, 500);
-function onConcurrencyInput(value: string) {
-	const n = Number(value);
-	if (!Number.isFinite(n) || n < 1) return;
-	toolCallConcurrency.value = n;
-	void emitConcurrency();
 }
 
 const thinkingDisabledReason = computed(() =>
@@ -264,8 +329,6 @@ const thinkingDisabledReason = computed(() =>
 				},
 			}),
 );
-
-const webSearchDisabledReason = computed(() => '');
 </script>
 
 <template>
@@ -289,15 +352,32 @@ const webSearchDisabledReason = computed(() => '');
 							{{ i18n.baseText('agents.builder.advanced.webSearch.hint') }}
 						</N8nText>
 					</div>
-					<N8nTooltip :content="webSearchDisabledReason" :disabled="true" placement="top">
-						<N8nSwitch2
-							:model-value="webSearchEnabled"
-							:disabled="props.disabled"
-							:class="$style.switchControl"
-							data-testid="agent-web-search-toggle"
-							@update:model-value="(v) => onWebSearchToggle(Boolean(v))"
+					<N8nSelect
+						:model-value="webSearchMethod"
+						size="small"
+						:disabled="props.disabled"
+						:class="$style.shortInput"
+						data-testid="agent-web-search-method"
+						@update:model-value="(v) => onWebSearchMethodChange(v as WebSearchSelectValue)"
+					>
+						<N8nOption
+							value="off"
+							:label="i18n.baseText('agents.builder.advanced.webSearch.method.off')"
 						/>
-					</N8nTooltip>
+						<N8nOption
+							v-if="capabilities.webSearch"
+							value="native"
+							:label="i18n.baseText('agents.builder.advanced.webSearch.method.native')"
+						/>
+						<N8nOption
+							value="brave"
+							:label="i18n.baseText('agents.builder.advanced.webSearch.fallbackProvider.brave')"
+						/>
+						<N8nOption
+							value="searxng"
+							:label="i18n.baseText('agents.builder.advanced.webSearch.fallbackProvider.searxng')"
+						/>
+					</N8nSelect>
 				</div>
 
 				<div
@@ -305,7 +385,10 @@ const webSearchDisabledReason = computed(() => '');
 					:class="$style.subSettings"
 					data-testid="agent-web-search-settings"
 				>
-					<div v-if="capabilities.webSearch === 'anthropic.web_search'" :class="$style.row">
+					<div
+						v-if="webSearchMethod === 'native' && capabilities.webSearch === 'anthropic.web_search'"
+						:class="$style.row"
+					>
 						<div :class="$style.rowLabel">
 							<N8nText size="small" :bold="true">{{
 								i18n.baseText('agents.builder.advanced.webSearch.maxUses.label')
@@ -314,9 +397,10 @@ const webSearchDisabledReason = computed(() => '');
 								{{ i18n.baseText('agents.builder.advanced.webSearch.maxUses.hint') }}
 							</N8nText>
 						</div>
-						<N8nInput
-							type="number"
-							:model-value="webSearchMaxUses"
+						<N8nInputNumber2
+							:model-value="Number(webSearchMaxUses)"
+							:min="1"
+							:precision="0"
 							:disabled="props.disabled"
 							:class="$style.shortInput"
 							data-testid="agent-web-search-max-uses"
@@ -329,7 +413,10 @@ const webSearchDisabledReason = computed(() => '');
 						/>
 					</div>
 
-					<div v-if="capabilities.webSearch === 'openai.web_search'" :class="$style.row">
+					<div
+						v-if="webSearchMethod === 'native' && capabilities.webSearch === 'openai.web_search'"
+						:class="$style.row"
+					>
 						<div :class="$style.rowLabel">
 							<N8nText size="small" :bold="true">{{
 								i18n.baseText('agents.builder.advanced.webSearch.externalAccess.label')
@@ -352,7 +439,10 @@ const webSearchDisabledReason = computed(() => '');
 						/>
 					</div>
 
-					<div v-if="capabilities.webSearch === 'openai.web_search'" :class="$style.row">
+					<div
+						v-if="webSearchMethod === 'native' && capabilities.webSearch === 'openai.web_search'"
+						:class="$style.row"
+					>
 						<N8nText size="small" :bold="true">{{
 							i18n.baseText('agents.builder.advanced.webSearch.contextSize.label')
 						}}</N8nText>
@@ -378,30 +468,7 @@ const webSearchDisabledReason = computed(() => '');
 						</N8nSelect>
 					</div>
 
-					<div v-if="!capabilities.webSearch" :class="$style.row">
-						<N8nText size="small" :bold="true">{{
-							i18n.baseText('agents.builder.advanced.webSearch.fallbackProvider.label')
-						}}</N8nText>
-						<N8nSelect
-							:model-value="fallbackWebSearchProvider"
-							size="small"
-							:disabled="props.disabled"
-							:class="$style.shortInput"
-							data-testid="agent-web-search-fallback-provider"
-							@update:model-value="(v) => onFallbackProviderChange(v as FallbackWebSearchProvider)"
-						>
-							<N8nOption
-								value="brave"
-								:label="i18n.baseText('agents.builder.advanced.webSearch.fallbackProvider.brave')"
-							/>
-							<N8nOption
-								value="searxng"
-								:label="i18n.baseText('agents.builder.advanced.webSearch.fallbackProvider.searxng')"
-							/>
-						</N8nSelect>
-					</div>
-
-					<div v-if="!capabilities.webSearch" :class="$style.row">
+					<div v-if="webSearchMethod !== 'native'" :class="$style.row">
 						<div :class="$style.rowLabel">
 							<N8nText size="small" :bold="true">{{
 								i18n.baseText('agents.builder.advanced.webSearch.credential.label')
@@ -468,13 +535,14 @@ const webSearchDisabledReason = computed(() => '');
 								{{ i18n.baseText('agents.builder.advanced.budgetTokens.hint') }}
 							</N8nText>
 						</div>
-						<N8nInput
-							type="number"
-							:model-value="String(budgetTokens)"
+						<N8nInputNumber2
+							:model-value="budgetTokens"
+							:min="BUDGET_TOKENS_MIN"
+							:precision="0"
 							:disabled="props.disabled"
 							:class="$style.shortInput"
 							data-testid="agent-budget-tokens-input"
-							@update:model-value="onBudgetInput"
+							@update:model-value="onBudgetChange"
 						/>
 					</div>
 
@@ -510,13 +578,36 @@ const webSearchDisabledReason = computed(() => '');
 						{{ i18n.baseText('agents.builder.advanced.concurrency.hint') }}
 					</N8nText>
 				</div>
-				<N8nInput
-					type="number"
-					:model-value="String(toolCallConcurrency)"
+				<N8nInputNumber2
+					:model-value="concurrencyModelValue"
+					:min="CONCURRENCY_MIN"
+					:max="CONCURRENCY_MAX"
+					:precision="0"
 					:disabled="props.disabled"
 					:class="$style.shortInput"
 					data-testid="agent-concurrency-input"
-					@update:model-value="onConcurrencyInput"
+					@update:model-value="onConcurrencyChange"
+				/>
+			</div>
+
+			<div :class="$style.row">
+				<div :class="$style.rowLabel">
+					<N8nText size="small" :bold="true">{{
+						i18n.baseText('agents.builder.advanced.maxIterations.label')
+					}}</N8nText>
+					<N8nText size="xsmall" color="text-light">
+						{{ i18n.baseText('agents.builder.advanced.maxIterations.hint') }}
+					</N8nText>
+				</div>
+				<N8nInputNumber2
+					:model-value="maxIterationsModelValue"
+					:min="MAX_ITERATIONS_MIN"
+					:max="MAX_ITERATIONS_MAX"
+					:precision="0"
+					:disabled="props.disabled"
+					:class="$style.shortInput"
+					data-testid="agent-max-iterations-input"
+					@update:model-value="onMaxIterationsChange"
 				/>
 			</div>
 		</div>

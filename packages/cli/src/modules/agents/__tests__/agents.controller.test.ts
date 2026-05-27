@@ -254,7 +254,8 @@ describe('AgentsController integration credentials', () => {
 		agentRepository.findByIdAndProjectId.mockResolvedValue({
 			id: 'agent-1',
 			projectId: 'project-1',
-			publishedVersion: {},
+			activeVersionId: 'v1',
+			activeVersion: {},
 			integrations: [],
 		} as never);
 
@@ -326,7 +327,8 @@ describe('AgentsController integration credentials', () => {
 		agentRepository.findByIdAndProjectId.mockResolvedValue({
 			id: 'agent-1',
 			projectId: 'project-1',
-			publishedVersion: {},
+			activeVersionId: 'v1',
+			activeVersion: {},
 			integrations: [],
 		} as never);
 
@@ -377,7 +379,8 @@ describe('AgentsController integration credentials', () => {
 		const agent = {
 			id: 'agent-1',
 			projectId: 'project-1',
-			publishedVersion: {},
+			activeVersionId: 'v1',
+			activeVersion: {},
 			integrations: [],
 		};
 		agentRepository.findByIdAndProjectId.mockResolvedValue(agent as never);

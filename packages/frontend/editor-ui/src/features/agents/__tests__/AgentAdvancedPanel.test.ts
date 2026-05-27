@@ -20,7 +20,7 @@ vi.mock('@/features/credentials/credentials.store', () => ({
 	}),
 }));
 
-// Sub-control flips depend on debouncing — execute synchronously in the test.
+// Numeric/thinking sub-controls debounce — execute synchronously in the test.
 vi.mock('@vueuse/core', async (importOriginal) => {
 	const actual = await importOriginal<typeof VueUse>();
 	return {
@@ -44,18 +44,19 @@ const globalStubs = {
 	},
 	N8nText: { template: '<span><slot /></span>' },
 	N8nTooltip: { template: '<div><slot /></div>' },
-	N8nInput: {
-		props: ['modelValue', 'disabled'],
+	N8nInputNumber2: {
+		props: ['modelValue', 'disabled', 'min', 'max', 'precision', 'placeholder'],
 		emits: ['update:modelValue'],
 		template:
-			'<input :value="modelValue" :disabled="disabled" @input="$emit(\'update:modelValue\', $event.target.value)" />',
+			'<input :value="modelValue" :disabled="disabled" @input="$emit(\'update:modelValue\', Number($event.target.value))" />',
 	},
 	N8nSelect: {
 		props: ['modelValue', 'disabled'],
 		emits: ['update:modelValue'],
-		template: '<select :disabled="disabled"><slot /></select>',
+		template:
+			'<select v-bind="$attrs" :value="modelValue" :disabled="disabled" @change="$emit(\'update:modelValue\', $event.target.value)"><slot /></select>',
 	},
-	N8nOption: { template: '<option><slot /></option>' },
+	N8nOption: { props: ['value', 'label'], template: '<option :value="value">{{ label }}</option>' },
 	N8nSwitch2: {
 		props: ['modelValue', 'disabled'],
 		emits: ['update:modelValue'],
@@ -74,6 +75,34 @@ function makeConfig(overrides: Partial<AgentJsonConfig> = {}): AgentJsonConfig {
 	} as AgentJsonConfig;
 }
 
+function emitSelectValue(wrapper: ReturnType<typeof mount>, testId: string, value: string) {
+	const select = wrapper.findComponent(`[data-testid="${testId}"]`) as unknown as {
+		vm: { $emit: (event: 'update:modelValue', value: string) => void };
+	};
+	select.vm.$emit('update:modelValue', value);
+}
+
+function findStubComponent(wrapper: ReturnType<typeof mount>, testId: string) {
+	return wrapper.findComponent(`[data-testid="${testId}"]`) as unknown as {
+		exists: () => boolean;
+		props: (name: string) => unknown;
+	};
+}
+
+type WebSearchConfig = {
+	enabled: boolean;
+	provider?: string;
+	credential?: string;
+};
+
+function getWebSearchConfig(changes: Partial<AgentJsonConfig>): WebSearchConfig | undefined {
+	return (
+		changes.config as
+			| (NonNullable<AgentJsonConfig['config']> & { webSearch?: WebSearchConfig })
+			| undefined
+	)?.webSearch;
+}
+
 describe('AgentAdvancedPanel', () => {
 	it('treats sparse native web search config as disabled', async () => {
 		const wrapper = mount(AgentAdvancedPanel, {
@@ -81,14 +110,15 @@ describe('AgentAdvancedPanel', () => {
 			global: { stubs: globalStubs },
 		});
 
-		const toggle = wrapper.find('[data-testid="agent-web-search-toggle"]');
-		expect(toggle.exists()).toBe(true);
-		expect(toggle.attributes('disabled')).toBeUndefined();
+		const method = findStubComponent(wrapper, 'agent-web-search-method');
+		expect(method.exists()).toBe(true);
+		expect(method.props('modelValue')).toBe('off');
 
-		await toggle.trigger('click');
+		emitSelectValue(wrapper, 'agent-web-search-method', 'native');
+		await nextTick();
 		const events = wrapper.emitted('update:config') ?? [];
 		const last = events[events.length - 1][0] as Partial<AgentJsonConfig>;
-		expect(last.config?.webSearch).toEqual({ enabled: true });
+		expect(getWebSearchConfig(last)).toEqual({ enabled: true, provider: 'native' });
 		expect(last.providerTools).toEqual({ 'anthropic.web_search': { maxUses: 5 } });
 	});
 
@@ -128,11 +158,12 @@ describe('AgentAdvancedPanel', () => {
 			global: { stubs: globalStubs },
 		});
 
-		await wrapper.find('[data-testid="agent-web-search-toggle"]').trigger('click');
+		emitSelectValue(wrapper, 'agent-web-search-method', 'off');
+		await nextTick();
 
 		const events = wrapper.emitted('update:config') ?? [];
 		const last = events[events.length - 1][0] as Partial<AgentJsonConfig>;
-		expect(last.config?.webSearch).toEqual({ enabled: false });
+		expect(getWebSearchConfig(last)).toEqual({ enabled: false });
 		expect(last.providerTools).toEqual({ 'openai.image_generation': {} });
 	});
 
@@ -143,15 +174,109 @@ describe('AgentAdvancedPanel', () => {
 			global: { stubs: globalStubs },
 		});
 
-		const toggle = wrapper.find('[data-testid="agent-web-search-toggle"]');
-		expect(toggle.exists()).toBe(true);
-		expect(toggle.attributes('disabled')).toBeUndefined();
-
-		await toggle.trigger('click');
+		emitSelectValue(wrapper, 'agent-web-search-method', 'brave');
+		await nextTick();
 
 		const events = wrapper.emitted('update:config') ?? [];
 		const last = events[events.length - 1][0] as Partial<AgentJsonConfig>;
-		expect(last.config?.webSearch).toEqual({ enabled: true, provider: 'brave' });
+		expect(getWebSearchConfig(last)).toEqual({ enabled: true, provider: 'brave' });
+	});
+
+	it('keeps fallback controls visible on native-capable models', async () => {
+		const config = makeConfig({
+			config: { webSearch: { enabled: true, provider: 'brave', credential: 'brave-1' } },
+			providerTools: { 'anthropic.web_search': { maxUses: 5 } },
+		} as Partial<AgentJsonConfig>);
+		const wrapper = mount(AgentAdvancedPanel, {
+			props: { config },
+			global: { stubs: globalStubs },
+		});
+
+		expect(wrapper.find('[data-testid="agent-web-search-method"]').exists()).toBe(true);
+		expect(wrapper.find('[data-testid="agent-web-search-fallback-credential"]').exists()).toBe(
+			true,
+		);
+		expect(wrapper.find('[data-testid="agent-web-search-max-uses"]').exists()).toBe(false);
+	});
+
+	it('switches fallback web search to native and emits native provider tools', async () => {
+		const config = makeConfig({
+			config: { webSearch: { enabled: true, provider: 'brave', credential: 'brave-1' } },
+		} as Partial<AgentJsonConfig>);
+		const wrapper = mount(AgentAdvancedPanel, {
+			props: { config },
+			global: { stubs: globalStubs },
+		});
+
+		emitSelectValue(wrapper, 'agent-web-search-method', 'native');
+		await nextTick();
+
+		const events = wrapper.emitted('update:config') ?? [];
+		const last = events[events.length - 1][0] as Partial<AgentJsonConfig>;
+		expect(getWebSearchConfig(last)).toEqual({ enabled: true, provider: 'native' });
+		expect(last.providerTools).toEqual({ 'anthropic.web_search': { maxUses: 5 } });
+	});
+
+	it('preserves fallback web search credential when switching away and back to the same fallback provider', async () => {
+		const config = makeConfig({
+			config: { webSearch: { enabled: true, provider: 'brave', credential: 'brave-1' } },
+		} as Partial<AgentJsonConfig>);
+		const wrapper = mount(AgentAdvancedPanel, {
+			props: { config },
+			global: { stubs: globalStubs },
+		});
+
+		emitSelectValue(wrapper, 'agent-web-search-method', 'native');
+		await nextTick();
+		emitSelectValue(wrapper, 'agent-web-search-method', 'brave');
+		await nextTick();
+
+		const events = wrapper.emitted('update:config') ?? [];
+		const last = events[events.length - 1][0] as Partial<AgentJsonConfig>;
+		expect(getWebSearchConfig(last)).toEqual({
+			enabled: true,
+			provider: 'brave',
+			credential: 'brave-1',
+		});
+	});
+
+	it('clears fallback web search credential when switching fallback providers', async () => {
+		const config = makeConfig({
+			config: { webSearch: { enabled: true, provider: 'brave', credential: 'brave-1' } },
+		} as Partial<AgentJsonConfig>);
+		const wrapper = mount(AgentAdvancedPanel, {
+			props: { config },
+			global: { stubs: globalStubs },
+		});
+
+		emitSelectValue(wrapper, 'agent-web-search-method', 'searxng');
+		await nextTick();
+
+		const events = wrapper.emitted('update:config') ?? [];
+		const last = events[events.length - 1][0] as Partial<AgentJsonConfig>;
+		expect(getWebSearchConfig(last)).toEqual({ enabled: true, provider: 'searxng' });
+	});
+
+	it('switches native web search to fallback and strips native provider tools', async () => {
+		const config = makeConfig({
+			config: { webSearch: { enabled: true, provider: 'native' } },
+			providerTools: {
+				'anthropic.web_search': { maxUses: 5 },
+				'openai.image_generation': {},
+			},
+		} as Partial<AgentJsonConfig>);
+		const wrapper = mount(AgentAdvancedPanel, {
+			props: { config },
+			global: { stubs: globalStubs },
+		});
+
+		emitSelectValue(wrapper, 'agent-web-search-method', 'brave');
+		await nextTick();
+
+		const events = wrapper.emitted('update:config') ?? [];
+		const last = events[events.length - 1][0] as Partial<AgentJsonConfig>;
+		expect(getWebSearchConfig(last)).toEqual({ enabled: true, provider: 'brave' });
+		expect(last.providerTools).toEqual({ 'openai.image_generation': {} });
 	});
 
 	it('shows the budget-tokens sub-control for Anthropic when thinking is on', async () => {
@@ -211,11 +336,75 @@ describe('AgentAdvancedPanel', () => {
 			props: { config, disabled: true },
 			global: { stubs: globalStubs },
 		});
-		const webSearchToggle = wrapper.find('[data-testid="agent-web-search-toggle"]');
-		expect(webSearchToggle.attributes('disabled')).toBeDefined();
-		const toggle = wrapper.find('[data-testid="agent-thinking-toggle"]');
-		expect(toggle.attributes('disabled')).toBeDefined();
-		const concurrency = wrapper.find('[data-testid="agent-concurrency-input"]');
-		expect(concurrency.attributes('disabled')).toBeDefined();
+		const webSearchMethod = findStubComponent(wrapper, 'agent-web-search-method');
+		expect(webSearchMethod.props('disabled')).toBe(true);
+		expect(
+			wrapper.find('[data-testid="agent-thinking-toggle"]').attributes('disabled'),
+		).toBeDefined();
+		expect(
+			wrapper.find('[data-testid="agent-concurrency-input"]').attributes('disabled'),
+		).toBeDefined();
+		expect(
+			wrapper.find('[data-testid="agent-max-iterations-input"]').attributes('disabled'),
+		).toBeDefined();
+	});
+
+	it('renders the max-iterations input', () => {
+		const wrapper = mount(AgentAdvancedPanel, {
+			props: { config: makeConfig() },
+			global: { stubs: globalStubs },
+		});
+		expect(wrapper.find('[data-testid="agent-max-iterations-input"]').exists()).toBe(true);
+	});
+
+	it('initialises max-iterations input from config', () => {
+		const config = makeConfig({ config: { maxIterations: 42 } } as Partial<AgentJsonConfig>);
+		const wrapper = mount(AgentAdvancedPanel, {
+			props: { config },
+			global: { stubs: globalStubs },
+		});
+		const input = wrapper.find('[data-testid="agent-max-iterations-input"]');
+		expect(Number(input.element.getAttribute('value'))).toBe(42);
+	});
+
+	it('emits update:config with maxIterations when the field changes', async () => {
+		const wrapper = mount(AgentAdvancedPanel, {
+			props: { config: makeConfig() },
+			global: { stubs: globalStubs },
+		});
+		const input = wrapper.find('[data-testid="agent-max-iterations-input"]');
+		await input.setValue('15');
+		const events = wrapper.emitted('update:config') ?? [];
+		expect(events.length).toBeGreaterThan(0);
+		const last = events[events.length - 1][0] as Partial<AgentJsonConfig>;
+		expect(last.config?.maxIterations).toBe(15);
+	});
+
+	it('removes maxIterations from config when the field is cleared (NaN)', async () => {
+		const config = makeConfig({ config: { maxIterations: 10 } } as Partial<AgentJsonConfig>);
+		const wrapper = mount(AgentAdvancedPanel, {
+			props: { config },
+			global: { stubs: globalStubs },
+		});
+		const input = wrapper.find('[data-testid="agent-max-iterations-input"]');
+		// Non-numeric input produces NaN — treated as "clear" → key removed from config
+		await input.setValue('abc');
+		const events = wrapper.emitted('update:config') ?? [];
+		expect(events.length).toBeGreaterThan(0);
+		const last = events[events.length - 1][0] as Partial<AgentJsonConfig>;
+		expect(last.config).not.toHaveProperty('maxIterations');
+	});
+
+	it('emits update:config with toolCallConcurrency when the concurrency field changes', async () => {
+		const wrapper = mount(AgentAdvancedPanel, {
+			props: { config: makeConfig() },
+			global: { stubs: globalStubs },
+		});
+		const input = wrapper.find('[data-testid="agent-concurrency-input"]');
+		await input.setValue('5');
+		const events = wrapper.emitted('update:config') ?? [];
+		expect(events.length).toBeGreaterThan(0);
+		const last = events[events.length - 1][0] as Partial<AgentJsonConfig>;
+		expect(last.config?.toolCallConcurrency).toBe(5);
 	});
 });

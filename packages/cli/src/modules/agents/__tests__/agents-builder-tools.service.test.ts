@@ -294,7 +294,7 @@ describe('AgentsBuilderToolsService', () => {
 			expect(agentsService.updateConfig).toHaveBeenCalledWith(agentId, projectId, normalizedConfig);
 		});
 
-		it('write_config removes stale native web search tools for unsupported providers', async () => {
+		it('write_config rejects native web search for unsupported providers', async () => {
 			const { service, agentsService } = makeService();
 			const currentConfig = { ...baseConfig, integrations: [] };
 			const updatedConfig: AgentJsonConfig = {
@@ -306,10 +306,75 @@ describe('AgentsBuilderToolsService', () => {
 					'openai.image_generation': {},
 				},
 			};
-			const normalizedConfig = {
-				...updatedConfig,
-				config: { toolCallConcurrency: 2 },
-				providerTools: { 'openai.image_generation': {} },
+			agentsService.findById.mockResolvedValue(makeAgent(baseConfig));
+
+			const result = await getJsonTool(service, BUILDER_TOOLS.WRITE_CONFIG).handler!(
+				{
+					baseConfigHash: getAgentConfigHash(currentConfig),
+					json: JSON.stringify(updatedConfig),
+				},
+				ctx,
+			);
+
+			expect(result).toEqual({
+				ok: false,
+				errors: [
+					{
+						path: '/config/webSearch/provider',
+						message:
+							'Native web search is only supported for Anthropic and OpenAI models. Use Brave or SearXNG fallback web search for this model.',
+					},
+				],
+			});
+			expect(agentsService.updateConfig).not.toHaveBeenCalled();
+		});
+
+		it('write_config rejects auto web search for unsupported providers', async () => {
+			const { service, agentsService } = makeService();
+			const currentConfig = { ...baseConfig, integrations: [] };
+			const updatedConfig: AgentJsonConfig = {
+				...currentConfig,
+				model: 'xai/grok-4',
+				config: { webSearch: { enabled: true, provider: 'auto' } },
+			};
+			agentsService.findById.mockResolvedValue(makeAgent(baseConfig));
+
+			const result = await getJsonTool(service, BUILDER_TOOLS.WRITE_CONFIG).handler!(
+				{
+					baseConfigHash: getAgentConfigHash(currentConfig),
+					json: JSON.stringify(updatedConfig),
+				},
+				ctx,
+			);
+
+			expect(result).toEqual({
+				ok: false,
+				errors: [
+					{
+						path: '/config/webSearch/provider',
+						message:
+							'Native web search is only supported for Anthropic and OpenAI models. Use Brave or SearXNG fallback web search for this model.',
+					},
+				],
+			});
+			expect(agentsService.updateConfig).not.toHaveBeenCalled();
+		});
+
+		it('write_config preserves fallback web search config for unsupported providers', async () => {
+			const { service, agentsService } = makeService();
+			const currentConfig = { ...baseConfig, integrations: [] };
+			const updatedConfig: AgentJsonConfig = {
+				...currentConfig,
+				model: 'xai/grok-4',
+				config: { webSearch: { enabled: true, provider: 'brave', credential: 'brave-key' } },
+				providerTools: {
+					'anthropic.web_search': { maxUses: 5 },
+				},
+			};
+			const normalizedConfig: AgentJsonConfig = {
+				...currentConfig,
+				model: 'xai/grok-4',
+				config: { webSearch: { enabled: true, provider: 'brave', credential: 'brave-key' } },
 			};
 			agentsService.findById.mockResolvedValue(makeAgent(baseConfig));
 			agentsService.updateConfig.mockResolvedValue({
@@ -329,12 +394,11 @@ describe('AgentsBuilderToolsService', () => {
 			expect(agentsService.updateConfig).toHaveBeenCalledWith(agentId, projectId, normalizedConfig);
 		});
 
-		it('write_config preserves fallback web search config for unsupported providers', async () => {
+		it('write_config preserves fallback web search config for native-capable providers', async () => {
 			const { service, agentsService } = makeService();
 			const currentConfig = { ...baseConfig, integrations: [] };
 			const updatedConfig: AgentJsonConfig = {
 				...currentConfig,
-				model: 'xai/grok-4',
 				config: { webSearch: { enabled: true, provider: 'brave', credential: 'brave-key' } },
 				providerTools: {
 					'anthropic.web_search': { maxUses: 5 },
@@ -342,7 +406,6 @@ describe('AgentsBuilderToolsService', () => {
 			};
 			const normalizedConfig: AgentJsonConfig = {
 				...currentConfig,
-				model: 'xai/grok-4',
 				config: { webSearch: { enabled: true, provider: 'brave', credential: 'brave-key' } },
 			};
 			agentsService.findById.mockResolvedValue(makeAgent(baseConfig));
